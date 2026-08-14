@@ -1,0 +1,23 @@
+[package]
+name = "calx-gnomon"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "The absmax-aware BF16 to FP16 selective recast: one Rust tool for HF safetensors and GGUF, all tiers"
+repository = "https://github.com/slartibardfast/calx-gnomon"
+publish = false
+
+[dependencies]
+memmap2 = "0.9"
+regex = "1"
+serde_json = "1"
+serde_yaml = "0.9"
+
+[profile.release]
+# Reproducibility: no incremental state in the artifact, single codegen unit.
+incremental = false
+codegen-units = 1
+
+[lints.rust]
+# The Kani verifier is invoked as `cargo kani`; plain builds never set it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

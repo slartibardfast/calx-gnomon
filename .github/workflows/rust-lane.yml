@@ -1,0 +1,23 @@
+name: rust-lane
+on:
+  push:
+    paths: ['src/**', 'tests/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'vendor/**']
+  pull_request:
+    paths: ['src/**', 'tests/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'vendor/**']
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build + test offline (hermetic, vendored)
+        run: |
+          cargo build --release --locked --offline
+          cargo test --offline --quiet
+      - name: smoke the gate CLI (exit codes 0 / 2 / 1)
+        run: |
+          set -e
+          T=$(mktemp -d)
+          ./target/release/calx-gnomon --tier dry-run; rc=$?
+          test $rc -eq 1

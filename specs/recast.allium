@@ -272,8 +272,11 @@ contract SelectiveRecast {
 
     @invariant BandCNeverCastAtScaleOne
         -- No band C tensor is emitted as f16 at scale 1.0, at any tier:
-        -- T1 keeps it bf16; T2-T5 rescale first. The invariant failure
-        -- mode (Inf/clamped tails) is structurally unreachable.
+        -- T1 keeps it bf16; T2/T3 and the T4/T5 non-2D fallbacks rescale
+        -- first. T4 2-D is the record-only quirk's edge: the data pass
+        -- plain-casts and HALTS on Inf (exit 1) rather than emit one;
+        -- the Kani lane proves the decide-level law, the t4 tests bind
+        -- the halt.
 
     @invariant PassthroughByteIdentity
         -- A tensor whose source dtype is not bf16 (quantized codes,
