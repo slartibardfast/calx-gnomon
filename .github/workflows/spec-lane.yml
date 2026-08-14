@@ -1,0 +1,25 @@
+name: spec-lane
+on:
+  push:
+    paths: ['specs/**']
+  pull_request:
+    paths: ['specs/**']
+
+jobs:
+  allium:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install allium-cli
+        run: cargo install allium-cli --locked
+      - name: allium check + analyse every spec
+        run: |
+          set -e
+          for spec in specs/*.allium; do
+            echo "== $spec"
+            allium check "$spec" > /tmp/check.json
+            jq -e '.diagnostics | map(select(.severity == "error")) | length == 0' /tmp/check.json
+            allium analyse "$spec" > /tmp/analyse.json
+            jq -e '(.findings | length) == 0' /tmp/analyse.json
+          done

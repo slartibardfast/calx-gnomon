@@ -1,0 +1,63 @@
+# recast.obligations — dispositions for every `allium plan` obligation
+# derived from recast.allium (plan/0146 P1). Lanes: `structural` the
+# spec's own check/analyse lane; `kani:` the Rust core's #[cfg(kani)]
+# harnesses; `test:` the named cargo test discharging it in CI. The
+# gguf-side parity obligation is waived until the P3 port lands; every
+# other disposition is discharged by the P2 hf-side implementation.
+
+# -- config defaults: one test reads the binary's constants
+config-default.fp16_half_range => test:config_defaults
+config-default.fp16_max => test:config_defaults
+config-default.rescale_target => test:config_defaults
+config-default.min_scale => test:config_defaults
+
+# -- enums and entity fields: the type system, discharged structurally
+enum-comparable.Band => structural
+enum-comparable.Tier => structural
+enum-comparable.ArtifactFormat => structural
+entity-fields.TorchCast => structural
+entity-fields.GgufRecast => structural
+entity-fields.TensorRecord => structural
+entity-fields.RecastRun => structural
+entity-fields.PipelineInvocation => structural
+
+# -- the band law: Kani lane, universal over bit patterns
+invariant.TensorRecord.BandTotallyClassified => kani:band_totally_classified
+
+# -- run lifecycle: behavioural, the CLI tests
+transition-edge.RecastRun.running.completed => test:run_lifecycle_completes
+transition-edge.RecastRun.running.halted => test:run_lifecycle_halts
+transition-rejected.RecastRun.status => test:exit_codes_distinct
+transition-terminal.RecastRun.status => structural
+
+# -- rules: the tier dispatch table, one test per tier
+rule-success.InvokeRecast => test:gate_cli_invocation
+rule-entity-creation.InvokeRecast.1 => test:gate_cli_invocation
+rule-success.ClassifyTensor => test:census_classifies_every_tensor
+rule-success.BuildCensus => test:census_completeness
+rule-success.CompleteRun => test:run_lifecycle_completes
+rule-failure.CompleteRun.1 => test:run_lifecycle_completes
+rule-success.HaltRun => test:run_lifecycle_halts
+rule-failure.HaltRun.1 => test:run_lifecycle_halts
+rule-success.T1Dispatch => test:t1_dispatch
+rule-failure.T1Dispatch.1 => test:t1_dispatch
+rule-success.RescaleTiers => test:t2_t3_rescale
+rule-failure.RescaleTiers.1 => test:t2_t3_rescale
+rule-success.T4RecordsScalesOnly => test:t4_records_scales_only
+rule-failure.T4RecordsScalesOnly.1 => test:t4_records_scales_only
+rule-success.T5Hadamard => test:t5_hadamard
+rule-failure.T5Hadamard.1 => test:t5_hadamard
+rule-success.DryRunWritesNothing => test:dry_run_writes_nothing
+rule-failure.DryRunWritesNothing.1 => test:dry_run_writes_nothing
+rule-success.ExitCodeSignalsDeviation => test:exit_code_signals_deviation
+rule-failure.ExitCodeSignalsDeviation.1 => test:exit_code_signals_deviation
+
+# -- contracts: the core cast is Kani's, the parity gates are tests
+contract-signature.SelectiveRecast.recast => kani:normal_range_bit_exact
+contract-signature.SelectiveRecast.hf_parity => test:torch_parity_bitwise
+contract-signature.GgufByteParity.parity => waived: the gguf adapter lands at P3 (plan/0146); re-disposition to test:gguf_byte_parity then
+
+# -- surface: the gate CLI
+surface-actor.GateCLI => test:gate_cli_invocation
+surface-exposure.GateCLI => test:census_tsv_schema
+surface-provides.GateCLI => test:gate_cli_invocation

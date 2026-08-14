@@ -1,0 +1,380 @@
+-- allium: 3
+-- recast.allium — the absmax-aware BF16 -> FP16 selective recast, the
+-- behavioural contract of calx-gnomon over BOTH artifact classes (HF
+-- safetensors checkpoints and GGUF), all tiers (call/0039, plan/0146).
+--
+-- Scope: band classification, tier dispatch, census emission, gate-CLI
+-- laws, and the per-format artifact contracts. The tier semantics are
+-- frozen HERE from gguf-recast @ 5887dfa (the maintained remix of the
+-- retired scripts/recast_bf16_to_fp16.py) before the port: T1-T5 below
+-- are the source of truth, and the port's acceptance gate is
+-- byte-identity against that pin on the GGUF side.
+--
+-- Personas (cast/): Wicket the gate consumer is primary — exit codes,
+-- schema stability, no silent fallbacks are LAWS here, not niceties.
+-- Vera the window operator reads the census as her trust anchor; Mira
+-- the reproducer treats this file as the whole contract.
+--
+-- Gate bindings (plan/0146):
+--   BandClassification     — Kani lane: total + monotone in absmax
+--   NormalRangeBitExact    — Kani lane (mantissa widening) + torch
+--                            parity (HF side, bitwise)
+--   GgufByteParity         — differential lane: byte-identical vs
+--                            gguf-recast @ 5887dfa on its acceptance
+--                            corpus, every tier
+--   D10 (plan/0147)        — a real-checkpoint census with band-c
+--                            count 0, exit 0, at tier t1
+--
+-- Excludes:
+--   - The Kani-provable arithmetic itself (band boundaries, RNE cast
+--     bit-exactness): this file states the properties; the proofs live
+--     in the Rust core's #[cfg(kani)] harnesses.
+--   - Performance (throughput, RSS budget): the .host-software recipe
+--     and plan/0146's verification ladder own those.
+--   - gguf-recast's remix subcommand (AutoRound INT4 -> Q4_0 repack):
+--     stays in gguf-recast until calx-gnomon's P3 port; not recast
+--     behaviour.
+
+-- ============================================================
+-- Config — the frozen numeric vocabulary (IEEE-754 binary16)
+-- ============================================================
+
+config {
+    -- The largest f16 such that every bf16 value with absmax <= this
+    -- converts exactly: the f16 normal range's upper half begins here.
+    fp16_half_range: Decimal = 32768.0
+
+    -- IEEE-754 binary16 max finite (65504): above this a bf16 absmax
+    -- cannot round-trip through f16 at scale 1.0.
+    fp16_max: Decimal = 65504.0
+
+    -- T2-T5 rescale target: band-C tensors divide by absmax/30000 so
+    -- the post-scale absmax lands at 30000, comfortably inside f16.
+    rescale_target: Decimal = 30000.0
+
+    -- T5 scale floor (post-Hadamard absmax can be ~0 for zero rows).
+    min_scale: Decimal = 0.000000000000000000000000000001
+}
+
+-- ============================================================
+-- Enumerations
+-- ============================================================
+
+-- The band a tensor falls in, a TOTAL function of its absmax (and only
+-- its absmax; policy preserves override the action, never the band).
+-- a: clean cast, no Inf risk. b: cast with edge-precision warning.
+-- c: not representable at scale 1.0 — tier dispatch decides.
+enum Band { band_a | band_b | band_c }
+
+enum Tier { dry_run | t1 | t2 | t3 | t4 | t5 }
+
+enum ArtifactFormat { hf_safetensors | gguf }
+
+-- ============================================================
+-- External entities — oracles, owned outside this spec
+-- ============================================================
+
+-- see: torch cast, version pinned in plan/0147 BUILD.lock (the differential oracle, not law)
+-- The HF-side parity oracle: torch's own bf16 -> f16 cast. The
+-- contract on the hf adapter is bitwise agreement with it.
+external entity TorchCast {
+    version: String
+}
+
+-- see: call/0018 (software/gguf-recast @ 5887dfa, the incumbent)
+-- The GGUF-side parity oracle: gguf-recast at its recorded pin, the
+-- incumbent this port must be byte-identical to.
+external entity GgufRecast {
+    pin: String
+}
+
+-- ============================================================
+-- Entities
+-- ============================================================
+
+-- One row of the census: what the gnomon indicates per tensor.
+entity TensorRecord {
+    name: String
+    source_dtype: String
+    absmax: Decimal
+    n_elem: Integer
+    n_subnormal: Integer
+    band: Band
+    policy_preserved: Boolean
+
+    invariant BandTotallyClassified {
+        (absmax <= config.fp16_half_range implies band = band_a)
+        and (config.fp16_half_range < absmax and absmax <= config.fp16_max
+             implies band = band_b)
+        and (config.fp16_max < absmax implies band = band_c)
+    }
+
+    -- Monotonicity (a larger absmax never classifies into a stricter
+    -- band) is the Kani lane's proof target (BandClassification,
+    -- plan/0146); it is not restated as an expression here.
+}
+
+-- One invocation of the tool over one artifact.
+entity RecastRun {
+    format: ArtifactFormat
+    tier: Tier
+    status: running | completed | halted
+    exit_code: Integer
+    census: List<TensorRecord>
+    band_c_kept: Integer
+    wrote_artifact: Boolean
+
+    transitions status {
+        running -> completed
+        running -> halted
+        terminal: completed, halted
+    }
+}
+
+-- ============================================================
+-- Rules — tier dispatch and the gate laws
+-- ============================================================
+
+-- The boundary event: a pipeline invocation starts a run.
+rule InvokeRecast {
+    when: TieredInvocation(invocation, format, tier)
+    ensures: RecastRun.created(
+        format: format,
+        tier: tier,
+        status: running,
+        exit_code: 0,
+        band_c_kept: 0,
+        wrote_artifact: false
+    )
+}
+
+rule ClassifyTensor {
+    when: record: TensorRecord.created
+    ensures: record.band = classify(record.absmax)
+    @guidance
+        -- classify is the total function of BandTotallyClassified.
+        -- A NaN absmax classifies band_c (NaN fails both <= tests),
+        -- the Python quirk, carried deliberately.
+}
+
+-- The census is built from the source artifact once the run starts;
+-- its completion chains into the terminal-state rules.
+rule BuildCensus {
+    when: run: RecastRun.status becomes running
+    ensures: CensusComplete(run)
+}
+
+-- The work is done: the run lands in its terminal state and the tier
+-- dispatch rules (below) bind its completed semantics.
+rule CompleteRun {
+    when: CensusComplete(run)
+    requires: run.status = running
+    ensures: run.status = completed
+}
+
+-- A halt-class failure (IO error, malformed artifact, unparseable
+-- policy): no artifact is trusted, exit 1.
+rule HaltRun {
+    when: HaltCondition(run, reason)
+    requires: run.status = running
+    ensures: run.status = halted
+    ensures: run.exit_code = 1
+    ensures: run.wrote_artifact = false
+}
+
+rule T1Dispatch {
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier = t1
+    for record in run.census:
+        ensures:
+            if record.band = band_c or record.policy_preserved:
+                record.outcome = kept_bf16
+            else:
+                record.outcome = cast_f16_scale_1
+    ensures: run.band_c_kept = (run.census where band = band_c).count
+}
+
+rule RescaleTiers {
+    -- T2 and T3 share one dispatch: band A/B cast at scale 1.0;
+    -- band C casts at per-tensor scale absmax / config.rescale_target.
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier = t2 or run.tier = t3
+    for record in run.census:
+        ensures:
+            if record.band = band_c:
+                record.outcome = cast_f16_rescaled
+            else:
+                record.outcome = cast_f16_scale_1
+}
+
+rule T4RecordsScalesOnly {
+    -- T4 computes per-row scales and RECORDS them in the artifact's
+    -- metadata; the emitted data is a plain RNE cast. The Python quirk,
+    -- carried byte-faithfully for parity; changing it is a spec change,
+    -- never a silent fix.
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier = t4
+    for record in run.census:
+        ensures: record.outcome = cast_f16_scale_1
+        ensures: record.scale_note = recorded_not_applied
+}
+
+rule T5Hadamard {
+    -- 2-D tensors take a Walsh-Hadamard row transform (side = largest
+    -- power of two <= the row length), then a per-tensor scale from the
+    -- post-transform absmax (floored at config.min_scale); non-2-D
+    -- tensors fall back to the T2 dispatch.
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier = t5
+    for record in run.census:
+        ensures: record.outcome = cast_f16_hadamard or record.outcome = cast_f16_rescaled
+}
+
+rule DryRunWritesNothing {
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier = dry_run
+    ensures: run.wrote_artifact = false
+    ensures: run.exit_code = 0
+}
+
+-- The Wicket law: a completed run with kept band-C tensors exits 2 —
+-- the artifact is valid, the deviation is signalled, the pipeline
+-- halts or the operator acknowledges. Clean runs exit 0; halt-class
+-- failures (IO, malformed artifact, unparseable policy) exit 1.
+rule ExitCodeSignalsDeviation {
+    when: run: RecastRun.status transitions_to completed
+    requires: run.tier != dry_run
+    ensures:
+        if run.band_c_kept > 0:
+            run.exit_code = 2
+        else:
+            run.exit_code = 0
+}
+
+-- ============================================================
+-- Contracts
+-- ============================================================
+
+-- The core recast, format-agnostic.
+contract SelectiveRecast {
+    recast: (run: RecastRun, record: TensorRecord) -> TensorRecord
+    hf_parity: (run: RecastRun, record: TensorRecord, oracle: TorchCast) -> Boolean
+
+    @invariant NormalRangeBitExact
+        -- A band A or B tensor cast at scale 1.0 equals the reference
+        -- RNE bf16 -> f16 conversion bit-for-bit. Within the f16 normal
+        -- range the conversion is exact (8-bit bf16 mantissa widens
+        -- into 11-bit f16); values below 2^-14 round to f16 subnormals
+        -- and are counted in the census row's n_subnormal, never
+        -- silently discarded. On the hf side the reference is TorchCast
+        -- at its recorded version; the Kani lane proves the core's
+        -- table against the same law.
+
+    @invariant BandCNeverCastAtScaleOne
+        -- No band C tensor is emitted as f16 at scale 1.0, at any tier:
+        -- T1 keeps it bf16; T2-T5 rescale first. The invariant failure
+        -- mode (Inf/clamped tails) is structurally unreachable.
+
+    @invariant PassthroughByteIdentity
+        -- A tensor whose source dtype is not bf16 (quantized codes,
+        -- f32, f16) is a byte-identical copy: the recast never touches
+        -- what it was not asked to touch.
+
+    @invariant Determinism
+        -- Same input bytes, tier, and policy produce the same output
+        -- bytes on every run: the parity gates' precondition, and
+        -- Wicket's re-run guarantee.
+
+    @invariant PolicyPreserveOverridesAction
+        -- A policy-preserved tensor stays bf16 regardless of band or
+        -- tier, recorded with outcome kept_bf16 and a note naming the
+        -- policy rule. The band is still classified and censused.
+}
+
+-- The hf adapter's artifact-level obligations.
+contract HfArtifactPreservation {
+    @invariant IndexInvariance
+        -- The output's tensor -> shard map matches the input's: bf16
+        -- and f16 are both 2 bytes, so shard byte sizes change only by
+        -- safetensors header deltas.
+
+    @invariant NonTensorFilesVerbatim
+        -- Every non-safetensors file in the checkpoint directory
+        -- (configs, tokenizer, generation_config) is copied verbatim,
+        -- except config.json's torch_dtype, rewritten to "float16"
+        -- when any tensor was cast.
+
+    @invariant NoTruncation
+        -- Every tensor in the source index appears in the output
+        -- exactly once (census completeness is the audit trail).
+}
+
+-- The gguf adapter's parity obligation.
+contract GgufByteParity {
+    parity: (run: RecastRun, oracle: GgufRecast) -> Boolean
+
+    @invariant ByteIdenticalToIncumbent
+        -- For every tier and the same input GGUF + policy, the output
+        -- is byte-identical to GgufRecast (the oracle argument) at its
+        -- recorded pin. Any intentional divergence is a spec change
+        -- first (the plan/0146 port rule), never a behaviour edit
+        -- discovered by the differential gate.
+}
+
+-- ============================================================
+-- Actors and the gate surface — Wicket's interface
+-- ============================================================
+
+-- see: cast/wicket.md (the invoking shell/CI, outside this spec)
+-- One CLI invocation, as the gate consumer issues it.
+external entity PipelineInvocation {
+    command_line: String
+    invocation_dir: String
+}
+
+actor PipelineRunner {
+    -- Wicket: a build agent, CI job, or quant pipeline invoking the
+    -- CLI. Identified by the invocation itself; no human behind it.
+    identified_by: PipelineInvocation where command_line != ""
+}
+
+surface GateCLI {
+    facing runner: PipelineRunner
+
+    context run: RecastRun
+
+    exposes:
+        run.exit_code
+        run.census where n_elem > 0
+        run.band_c_kept
+
+    provides:
+        TieredInvocation(runner, format, tier)
+        -- HaltCondition is not runner-initiated: halt conditions are
+        -- the environment's faults (IO error, malformed artifact,
+        -- unparseable policy) surfaced at this boundary.
+        HaltCondition(run, reason)
+
+    @guarantee StableCensusSchema
+        -- The census TSV columns are, in order: name, src_type,
+        -- out_type, band, absmax, n_elem, note — the gguf-recast seven
+        -- — plus n_subnormal appended. Column meaning never changes
+        -- across versions; new data lands as trailing columns only.
+
+    @guarantee NoSilentFallbacks
+        -- Every deviation from a plain scale-1.0 cast carries a note
+        -- in the census row (kept bf16, rescaled, hadamard,
+        -- recorded_not_applied, policy preserve) and, where it changes
+        -- the artifact's meaning, a distinct exit code.
+
+    @guarantee DistinctExitCodes
+        -- 0 clean; 2 completed with kept band-C (artifact valid);
+        -- 1 halted (IO, malformed input, bad policy). Wicket branches
+        -- on the code without parsing prose.
+
+    @guarantee OfflineHermetic
+        -- The tool builds and runs without network: a pinned
+        -- toolchain, vendored dependencies, CPU-only operation.
+}
+
+open question "T4 apply-scales — the record-only quirk is carried for parity; when the applied variant is wanted, is it a new tier (t4a) or a versioned spec change?"
