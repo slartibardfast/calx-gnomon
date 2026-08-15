@@ -521,15 +521,17 @@ pub fn run(
     Ok(RunOutcome { rows, band_c_kept, n_cast, wrote_artifact: wrote })
 }
 
-/// Surgical torch_dtype rewrite: only the dtype assignment changes, the
-/// rest of the file stays byte-identical (surgical-change principle).
+/// Surgical dtype rewrite: only the dtype assignment changes, the rest of
+/// the file stays byte-identical. Handles both key spellings: `dtype`
+/// (transformers v5 config schema) and `torch_dtype` (v4 and earlier);
+/// an already-float16 checkpoint is a no-op success.
 fn rewrite_torch_dtype(text: &str) -> Option<String> {
-    let already = regex::Regex::new(r#""torch_dtype"\s*:\s*"float16""#).ok()?;
+    let already = regex::Regex::new(r#""(?:torch_)?dtype"\s*:\s*"float16""#).ok()?;
     if already.is_match(text) {
         return Some(text.to_string());
     }
-    let re = regex::Regex::new(r#""torch_dtype"\s*:\s*"bfloat16""#).ok()?;
-    let cow = re.replacen(text, 1, r#""torch_dtype":"float16""#);
+    let re = regex::Regex::new(r#""(torch_)?dtype"(\s*:\s*)"bfloat16""#).ok()?;
+    let cow = re.replacen(text, 1, r#""${1}dtype"${2}"float16""#);
     if cow.as_ref() != text {
         Some(cow.into_owned())
     } else {
@@ -571,13 +573,22 @@ mod tests {
 
     #[test]
     fn rewrite_is_surgical() {
+        // v4 key, no space
         let cfg = r#"{"architectures":["Q"],"torch_dtype":"bfloat16","vocab_size":1}"#;
         assert_eq!(
             rewrite_torch_dtype(cfg).unwrap(),
             r#"{"architectures":["Q"],"torch_dtype":"float16","vocab_size":1}"#
         );
+        // v5 key (transformers 5.x renamed it), with space
+        let v5 = r#"{"architectures":["Q"],"dtype": "bfloat16"}"#;
+        assert_eq!(
+            rewrite_torch_dtype(v5).unwrap(),
+            r#"{"architectures":["Q"],"dtype": "float16"}"#
+        );
         let already = r#"{"torch_dtype": "float16"}"#;
         assert_eq!(rewrite_torch_dtype(already).unwrap(), already);
+        let already5 = r#"{"dtype": "float16"}"#;
+        assert_eq!(rewrite_torch_dtype(already5).unwrap(), already5);
         assert!(rewrite_torch_dtype(r#"{"a":1}"#).is_none());
     }
 }
