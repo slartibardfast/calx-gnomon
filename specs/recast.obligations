@@ -1,9 +1,10 @@
 # recast.obligations — dispositions for every `allium plan` obligation
 # derived from recast.allium (plan/0146 P1). Lanes: `structural` the
 # spec's own check/analyse lane; `kani:` the Rust core's #[cfg(kani)]
-# harnesses; `test:` the named cargo test discharging it in CI. The
-# gguf-side parity obligation is waived until the P3 port lands; every
-# other disposition is discharged by the P2 hf-side implementation.
+# harnesses; `test:` the named cargo test discharging it in CI. The P2
+# hf-side obligations stand; P3 (the repack tier) landed the
+# RepackByteParity block below; recast-over-GGUF tiers remain waived
+# until the full gguf-recast retirement (P4).
 
 # -- config defaults: one test reads the binary's constants
 config-default.fp16_half_range => test:config_defaults
@@ -23,6 +24,13 @@ entity-fields.PipelineInvocation => structural
 
 # -- the band law: Kani lane, universal over bit patterns
 invariant.TensorRecord.BandTotallyClassified => kani:band_totally_classified
+
+# -- P3 pure-logic Kani harnesses (pack laws) and fp laws
+invariant.gn.UnpackReproducesNibbles => kani:unpack_reproduces_every_nibble
+invariant.gn.VReorderIsAPermutation => kani:v_reorder_is_a_permutation
+invariant.gn.TransposeInvolutive => kani:transpose_involutive
+invariant.f16.UpcastExact => test:f16_upcast_exact_over_domain
+invariant.f16.ExpTableAgreement => test:f16_exp_agrees_with_bf16_table_in_range
 
 # -- run lifecycle: behavioural, the CLI tests
 transition-edge.RecastRun.running.completed => test:run_lifecycle_completes
@@ -55,7 +63,29 @@ rule-failure.ExitCodeSignalsDeviation.1 => test:exit_code_signals_deviation
 # -- contracts: the core cast is Kani's, the parity gates are tests
 contract-signature.SelectiveRecast.recast => kani:normal_range_bit_exact
 contract-signature.SelectiveRecast.hf_parity => test:torch_parity_bitwise
-contract-signature.GgufByteParity.parity => waived: the gguf adapter lands at P3 (plan/0146); re-disposition to test:gguf_byte_parity then
+contract-signature.GgufByteParity.parity => waived: recast-over-GGUF tiers (t1-t5 on GGUF artifacts) remain un-ported; the P3 window blocker landed the repack path instead, its parity is RepackByteParity below; this disposition retires with the full gguf-recast retirement (P4)
+
+# -- P3 repack tier (call/0039, window blocker for plan/0147); the ids
+#    below are allium plan's derived set for the RepackRun constructs.
+entity-fields.RepackRun => structural
+transition-edge.RepackRun.running.completed => test:trunk_byte_identical_to_oracle
+transition-edge.RepackRun.running.halted => test:repack_rejects_non_autoround
+transition-rejected.RepackRun.status => structural
+transition-terminal.RepackRun.status => structural
+rule-success.InvokeRepack => test:trunk_byte_identical_to_oracle
+rule-entity-creation.InvokeRepack.1 => test:trunk_byte_identical_to_oracle
+rule-success.ValidateAutoRoundShape => test:trunk_byte_identical_to_oracle
+rule-failure.ValidateAutoRoundShape.1 => test:repack_rejects_non_autoround
+rule-success.RejectInvalidCheckpoint => test:repack_rejects_non_autoround
+rule-failure.RejectInvalidCheckpoint.1 => test:trunk_byte_identical_to_oracle
+rule-success.EmitRepackArtifact => test:trunk_byte_identical_to_oracle
+rule-success.SpliceMtpFromRecast => test:splice_path
+rule-failure.SpliceMtpFromRecast.1 => test:splice_rejects_export_with_mtp
+rule-failure.SpliceMtpFromRecast.2 => test:splice_rejects_dir_without_mtp
+contract-signature.RepackByteParity.parity => test:trunk_byte_identical_to_oracle + test:real_ar_byte_identical
+invariant.RepackByteParity.TrunkByteIdenticalToIncumbent => test:trunk_byte_identical_to_oracle
+invariant.RepackByteParity.Fp16ExportAccepted => test:f16_keeper_export_repacks
+invariant.RepackRun.NoVReorderMetadata => test:no_v_reorder_metadata_keys
 
 # -- surface: the gate CLI
 surface-actor.GateCLI => test:gate_cli_invocation

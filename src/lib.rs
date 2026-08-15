@@ -3,11 +3,13 @@
 //! `specs/recast.allium` (call/0039, plan/0146).
 //!
 //! Core/adapter seam: this lib holds the artifact-generic core (bands,
-//! tier dispatch, census records, float laws) plus the hf adapter; the
-//! gguf adapter lands with the P3 port. The core never sees a file
+//! tier dispatch, census records, float laws), the hf adapter, and the
+//! gguf-side repack tier (AutoRound INT4 checkpoint -> Q4_0/Q4_0_AR16
+//! GGUF with the mtp splice, call/0039 P3). The core never sees a file
 //! format; adapters move bytes and call these.
 
 pub mod fp;
+pub mod gguf;
 pub mod hadamard;
 pub mod hf;
 pub mod policy;

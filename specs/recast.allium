@@ -353,6 +353,7 @@ surface GateCLI {
 
     provides:
         TieredInvocation(runner, format, tier)
+        RepackInvocation(runner, model_dir, outfile, splice_dir)
         -- HaltCondition is not runner-initiated: halt conditions are
         -- the environment's faults (IO error, malformed artifact,
         -- unparseable policy) surfaced at this boundary.
@@ -378,6 +379,101 @@ surface GateCLI {
     @guarantee OfflineHermetic
         -- The tool builds and runs without network: a pinned
         -- toolchain, vendored dependencies, CPU-only operation.
+}
+
+-- ============================================================
+-- The gguf repack tier (call/0039 P3): AutoRound INT4 checkpoint ->
+-- GGUF (Q4_0 trunk, V-row-perm Q4_0, V-col-perm Q4_0_AR16), home port
+-- of gguf-recast's remix, plus the plan/0147 mtp splice.
+-- ============================================================
+
+-- One repack invocation over one AutoRound export, with an optional
+-- mtp splice source.
+entity RepackRun {
+    model_dir: String
+    outfile: String
+    splice_dir: String
+    status: running | completed | halted
+    exit_code: Integer
+
+    transitions status {
+        running -> completed
+        running -> halted
+        terminal: completed, halted
+    }
+
+    @guidance
+        -- splice_dir empty means no splice; the run is then the pure
+        -- incumbent-parity repack.
+}
+
+rule InvokeRepack {
+    when: RepackInvocation(runner, model_dir, outfile, splice_dir)
+    ensures: RepackRun.created(
+        model_dir: model_dir,
+        outfile: outfile,
+        splice_dir: splice_dir,
+        status: running,
+        exit_code: 0
+    )
+}
+
+rule ValidateAutoRoundShape {
+    -- The checkpoint must be an auto-round bits-4 sym group-128 export of
+    -- the qwen3_5 text model (architectures Qwen3_5ForConditionalGeneration
+    -- or Qwen3_5ForCausalLM, quant_method auto-round, bits 4, sym true,
+    -- group_size 128). Valid shape proceeds; anything else is halt-class.
+    when: run: RepackRun.status becomes running
+    requires: run.model_dir is a valid auto-round qwen3_5 export
+    ensures: CheckpointAccepted(run)
+}
+
+rule RejectInvalidCheckpoint {
+    -- Halt-class (exit 1, no artifact, no guessing).
+    when: run: RepackRun.status becomes running
+    requires: run.model_dir is not a valid auto-round qwen3_5 export
+    ensures: run.status = halted
+    ensures: run.exit_code = 1
+}
+
+rule EmitRepackArtifact {
+    when: CheckpointAccepted(run)
+    ensures: run.status = completed
+    ensures: run.exit_code = 0
+    @guidance
+        -- Q4_0 codes and scales pack losslessly (verbatim copy, no
+        -- rounding); ggml naming follows the QWEN35 TensorNameMap subset;
+        -- KV order and 32-byte alignment follow the gguf-py writer. No
+        -- V-reorder metadata KV is ever emitted.
+}
+
+rule SpliceMtpFromRecast {
+    -- plan/0147 deviation D16: the AR export whose module tree carries no
+    -- mtp modules receives its mtp.* tensors from the recast FP16
+    -- checkpoint, appended after the export's tensors with the same ggml
+    -- names and dtype routings the 3.6 lineage's mtp block carries. The
+    -- spliced values are the splice checkpoint's FP16 contents verbatim.
+    when: run.splice_dir != "" and CheckpointAccepted(run)
+    requires: run.model_dir carries no mtp.* tensor
+    requires: run.splice_dir carries at least one mtp.* tensor, all FP16
+    ensures: every splice mtp.* tensor appears in the artifact exactly once
+}
+
+contract RepackByteParity {
+    parity: (run: RepackRun, oracle: GgufRecast) -> Boolean
+
+    @invariant TrunkByteIdenticalToIncumbent
+        -- With no splice, over the same BF16 AutoRound export, the repack
+        -- is byte-identical to GgufRecast's remix at its recorded pin
+        -- (itself byte-identical to the Python recipe). The gate runs over
+        -- the committed synthetic fixture (CI) and over the real
+        -- nineteen-gigabyte Qwen3.6 export (opt-in differential).
+
+    @invariant Fp16ExportAccepted
+        -- An FP16 tuning input yields FP16 keepers in the export, so the
+        -- repack admits FP16 passthrough tensors with exact-upcast and
+        -- identity conversion classes. New behaviour beyond the incumbent
+        -- (no parity oracle exists over it); bound by structural tests.
 }
 
 open question "T4 apply-scales — the record-only quirk is carried for parity; when the applied variant is wanted, is it a new tier (t4a) or a versioned spec change?"

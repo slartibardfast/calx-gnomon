@@ -1,0 +1,1 @@
+{"eos_token": {"content": "", "special": true}, "bos_token": {"content": "", "special": true}, "chat_template": "{% for m in messages %}{{ m.content }}{% endfor %}"}

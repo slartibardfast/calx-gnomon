@@ -1,4 +1,11 @@
-//! calx-gnomon: the absmax-aware BF16 -> FP16 selective recast.
+//! calx-gnomon: the absmax-aware BF16 -> FP16 selective recast, plus the
+//! GGUF-side repack tier (AutoRound INT4 checkpoint -> Q4_0/Q4_0_AR16 GGUF
+//! with the optional mtp splice, call/0039 P3).
+//!
+//! Subcommands:
+//!   calx-gnomon repack --model-dir <AR-export> --outfile <out.gguf>
+//!                      [--splice <fp16-checkpoint-dir>]
+//!   (otherwise) the recast gate CLI below.
 //!
 //! Exit codes (the Wicket law, specs/recast.allium):
 //!   0  clean (dry-run census, or a completed run with no band-C tensors)
@@ -10,8 +17,53 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let code = run(std::env::args().skip(1).collect());
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("repack") {
+        return ExitCode::from(run_repack(argv) as u8);
+    }
+    let code = run(argv);
     ExitCode::from(code as u8)
+}
+
+fn repack_usage() -> String {
+    "usage: calx-gnomon repack --model-dir <auto-round-export-dir> \
+     --outfile <out.gguf> [--splice <fp16-checkpoint-dir>]"
+        .into()
+}
+
+fn run_repack(argv: Vec<String>) -> i32 {
+    let get_opt = |flag: &str| -> Option<String> {
+        argv.iter()
+            .position(|a| a == flag)
+            .and_then(|i| argv.get(i + 1))
+            .cloned()
+    };
+    let (Some(model_dir), Some(outfile)) = (get_opt("--model-dir"), get_opt("--outfile")) else {
+        eprintln!("calx-gnomon: repack needs --model-dir and --outfile\n{}", repack_usage());
+        return 1;
+    };
+    let splice = get_opt("--splice");
+    let result = match &splice {
+        Some(dir) => calx_gnomon::gguf::run_with_splice(
+            &PathBuf::from(model_dir),
+            &PathBuf::from(dir),
+            &PathBuf::from(outfile),
+        ),
+        None => calx_gnomon::gguf::run(&PathBuf::from(model_dir), &PathBuf::from(outfile)),
+    };
+    match result {
+        Ok(()) => {
+            eprintln!(
+                "calx-gnomon: repack{} complete",
+                if splice.is_some() { " (spliced)" } else { "" }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("calx-gnomon: repack failed: {e}");
+            1
+        }
+    }
 }
 
 struct Args {
