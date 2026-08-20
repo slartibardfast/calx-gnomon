@@ -10,12 +10,12 @@ pub const GGUF_MAGIC: u32 = 0x4655_4747; // "GGUF"
 pub const GGUF_VERSION: u32 = 3;
 pub const ALIGNMENT: u64 = 32;
 
-// ggml type ids used by this tool (llama.cpp b9222 fork numbering).
+// ggml type ids used by this tool (llama.cpp fork numbering).
 pub const T_F32: u32 = 0;
 pub const T_F16: u32 = 1;
 pub const T_Q4_0: u32 = 2;
 pub const T_BF16: u32 = 30;
-pub const T_Q4_0_AR16: u32 = 42;
+pub const T_Q4_0_AR16: u32 = 43;
 
 /// (block_size, type_size) for the types this tool reads or writes.
 pub fn type_sizes(t: u32) -> Option<(u64, u64)> {
