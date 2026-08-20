@@ -242,6 +242,9 @@ struct Planned {
     tensor: usize,
     /// index of the .scales tensor for quant sources.
     scales: Option<usize>,
+    /// per-tensor AutoRound group size (the export's extra_config override,
+    /// defaulting to the global GROUP_SIZE).
+    group_size: usize,
     src: Source,
 }
 
@@ -326,9 +329,28 @@ fn run_inner(model_dir: &Path, splice_dir: Option<&Path>, outfile: &Path) -> io:
     if qc["group_size"].as_u64() != Some(GROUP_SIZE as u64) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "only group_size=128 is supported",
+            "only global group_size=128 is supported",
         ));
     }
+    // Per-tensor group-size overrides (e.g. self_attn at g32 in the
+    // host-tuned D26 export) live in extra_config; each module key carries
+    // its own {"group_size": N}. pack_q4_0 handles any N % 32 == 0.
+    let extra_gs: std::collections::HashMap<String, usize> = qc["extra_config"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| {
+                    v.as_object()
+                        .and_then(|o| o.get("group_size").and_then(|g| g.as_u64()))
+                        // extra_config keys carry the original checkpoint
+                        // namespace; filter_name strips "language_model."
+                        // from tensor names, so normalize the keys the same
+                        // way for the lookup to match.
+                        .map(|n| (k.replace("language_model.", ""), n as usize))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let topo = Topology {
         num_k_heads: hp.u64("linear_num_key_heads") as usize,
@@ -416,6 +438,7 @@ fn run_inner(model_dir: &Path, splice_dir: Option<&Path>, outfile: &Path) -> io:
             ckpt: 0,
             tensor: qi,
             scales: Some(si),
+            group_size: extra_gs.get(&base).copied().unwrap_or(GROUP_SIZE),
             src,
         });
         for suffix in [".qweight", ".qzeros", ".scales", ".g_idx"] {
@@ -876,6 +899,7 @@ fn plan_standard(
         ckpt: 0,
         tensor: tensor_idx,
         scales: None,
+        group_size: GROUP_SIZE,
         src,
     })
 }
@@ -891,7 +915,8 @@ fn emit_quant(
     let in_packed = qref.shape[0];
     let out_f = qref.shape[1];
     let in_f = in_packed * 8;
-    let n_groups = in_f / GROUP_SIZE;
+    let gs = p.group_size;
+    let n_groups = in_f / gs;
     if sref.shape != [n_groups, out_f] {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -908,7 +933,7 @@ fn emit_quant(
     Ok(match p.src {
         Source::QuantTrunk => {
             let codes_t = transpose_u8(&codes_in_out, in_f, out_f);
-            pack_q4_0(&codes_t, &scales, out_f, in_f, GROUP_SIZE)
+            pack_q4_0(&codes_t, &scales, out_f, in_f, gs)
         }
         Source::QuantVRowQkv | Source::QuantVRowZ => {
             let perm: &[usize] = if matches!(p.src, Source::QuantVRowQkv) {
@@ -930,7 +955,7 @@ fn emit_quant(
                     scales_p[g * out_f + j] = scales[g * out_f + pj];
                 }
             }
-            pack_q4_0(&codes_p, &scales_p, out_f, in_f, GROUP_SIZE)
+            pack_q4_0(&codes_p, &scales_p, out_f, in_f, gs)
         }
         Source::QuantVCol => {
             assert_eq!(perm_v.len(), in_f, "{}: col perm length", p.gguf_name);
