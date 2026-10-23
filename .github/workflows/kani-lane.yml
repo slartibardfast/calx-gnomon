@@ -15,6 +15,5 @@ jobs:
         run: |
           cd "$HOME"
           cargo install --locked kani-verifier
-          cargo kani --install-toolchain
       - name: cargo kani (the core's arithmetic laws)
         run: cargo kani --quiet
