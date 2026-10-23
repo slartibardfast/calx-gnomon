@@ -77,14 +77,14 @@ enum ArtifactFormat { hf_safetensors | gguf }
 -- see: torch cast, version pinned in plan/0147 BUILD.lock (the differential oracle, not law)
 -- The HF-side parity oracle: torch's own bf16 -> f16 cast. The
 -- contract on the hf adapter is bitwise agreement with it.
-external entity TorchCast {
+entity TorchCast {
     version: String
 }
 
 -- see: call/0018 (software/gguf-recast @ 5887dfa, the incumbent)
 -- The GGUF-side parity oracle: gguf-recast at its recorded pin, the
 -- incumbent this port must be byte-identical to.
-external entity GgufRecast {
+entity GgufRecast {
     pin: String
 }
 
@@ -330,7 +330,7 @@ contract GgufByteParity {
 
 -- see: cast/wicket.md (the invoking shell/CI, outside this spec)
 -- One CLI invocation, as the gate consumer issues it.
-external entity PipelineInvocation {
+entity PipelineInvocation {
     command_line: String
     invocation_dir: String
 }
@@ -424,14 +424,14 @@ rule ValidateAutoRoundShape {
     -- or Qwen3_5ForCausalLM, quant_method auto-round, bits 4, sym true,
     -- group_size 128). Valid shape proceeds; anything else is halt-class.
     when: run: RepackRun.status becomes running
-    requires: run.model_dir is a valid auto-round qwen3_5 export
+    requires: run.export_valid
     ensures: CheckpointAccepted(run)
 }
 
 rule RejectInvalidCheckpoint {
     -- Halt-class (exit 1, no artifact, no guessing).
     when: run: RepackRun.status becomes running
-    requires: run.model_dir is not a valid auto-round qwen3_5 export
+    requires: not run.export_valid
     ensures: run.status = halted
     ensures: run.exit_code = 1
 }
@@ -453,10 +453,11 @@ rule SpliceMtpFromRecast {
     -- checkpoint, appended after the export's tensors with the same ggml
     -- names and dtype routings the 3.6 lineage's mtp block carries. The
     -- spliced values are the splice checkpoint's FP16 contents verbatim.
-    when: run.splice_dir != "" and CheckpointAccepted(run)
-    requires: run.model_dir carries no mtp.* tensor
-    requires: run.splice_dir carries at least one mtp.* tensor, all FP16
-    ensures: every splice mtp.* tensor appears in the artifact exactly once
+    when: CheckpointAccepted(run)
+    requires: run.splice_dir != ""
+    requires: not run.source_carries_mtp
+    requires: run.splice_carries_mtp
+    ensures: run.splice_mtp_appended
 }
 
 contract RepackByteParity {
