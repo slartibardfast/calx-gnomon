@@ -1,5 +1,6 @@
 name: spec-lane
 on:
+  workflow_dispatch:
   push:
     paths: ['specs/**']
   pull_request:

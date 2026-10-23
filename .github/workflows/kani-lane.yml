@@ -1,5 +1,6 @@
 name: kani-lane
 on:
+  workflow_dispatch:
   push:
     paths: ['src/**', 'Cargo.toml', 'Cargo.lock', '.cargo/**', 'vendor/**']
   pull_request:
