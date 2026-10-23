@@ -11,7 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: install kani
-        uses: model-checking/kani-github-action@v1
+      - name: install kani (from $HOME so the repo's vendored source replacement does not capture the installer)
+        run: |
+          cd "$HOME"
+          cargo install --locked kani-verifier
+          cargo kani --install-toolchain
       - name: cargo kani (the core's arithmetic laws)
         run: cargo kani --quiet

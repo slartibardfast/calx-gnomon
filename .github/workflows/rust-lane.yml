@@ -20,5 +20,6 @@ jobs:
         run: |
           set -e
           T=$(mktemp -d)
-          ./target/release/calx-gnomon --tier dry-run; rc=$?
+          rc=0
+          ./target/release/calx-gnomon --tier dry-run || rc=$?
           test $rc -eq 1
